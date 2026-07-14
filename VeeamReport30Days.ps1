@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Generates a 7-day Veeam Backup & Replication HTML/PDF report (success/failed, speeds,
+    Generates a N-day Veeam Backup & Replication HTML/PDF report (success/failed, speeds,
     backed-up machines).
 
 .DESCRIPTION
@@ -19,7 +19,7 @@
     How many days back to include. Default 7.
 
 .PARAMETER CustomerName
-    Friendly name shown in the report header (e.g. "Contoso Ltd.").
+    Friendly name shown in the report header (e.g. "CompanyName Ltd.").
 
 .PARAMETER OutputFolder
     Where to save the generated HTML and PDF files.
@@ -28,16 +28,16 @@
     Switch. If present, only the HTML file is saved (no PDF conversion).
 
 .EXAMPLE
-    .\VeeamReport7Days.ps1 -CustomerName "Contoso Ltd." -OutputFolder "D:\Reports"
+    .\VeeamReport30Days.ps1 -CustomerName "CompanyName Ltd." -OutputFolder "D:\Reports" -ReportDays 30
 
 .EXAMPLE
     # HTML only, skip PDF
-    .\VeeamReport7Days.ps1 -CustomerName "Contoso Ltd." -SkipPdf
+    .\VeeamReport30Days.ps1 -CustomerName "CompanyName Ltd." -SkipPdf
 #>
 
 [CmdletBinding()]
 param(
-    [int]    $ReportDays     = 7,
+    [int]    $ReportDays     = 30,
     [string] $CustomerName   = "Customer",
     [string] $OutputFolder   = "C:\VeeamReports",
     [switch] $SkipPdf
@@ -99,10 +99,6 @@ function Get-UsageColor {
 }
 
 function Get-BytesValue {
-    # Veeam's repository container returns CachedTotalSpace / CachedFreeSpace as a
-    # Veeam.Backup.Common.VMemorySize object (displays like "63,9 TB (70368542851072)"),
-    # not a plain number. This pulls the raw byte count out of it regardless of
-    # exactly which property name that Veeam version exposes.
     param($MemorySizeObj)
     if ($null -eq $MemorySizeObj) { return 0 }
     if ($MemorySizeObj -is [long] -or $MemorySizeObj -is [int] -or $MemorySizeObj -is [double]) {
@@ -113,17 +109,12 @@ function Get-BytesValue {
             return [long]$MemorySizeObj.$propName
         }
     }
-    # Last resort: parse the raw byte count out of the string form, e.g. "63,9 TB (70368542851072)"
     $s = $MemorySizeObj.ToString()
     if ($s -match '\((\d+)\)') { return [long]$Matches[1] }
     return 0
 }
 
 function Get-TaskStartTime {
-    # Different Veeam versions/job types expose the per-VM task start time under
-    # different property paths, and it's sometimes just unset even when size/speed
-    # are populated. Try the known paths, and fall back to the parent session's
-    # start time so the column is never left blank.
     param($Task, $FallbackSession)
     foreach ($getter in @(
             { $Task.Progress.StartTime },
@@ -227,7 +218,6 @@ try {
         Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
     }
     else {
-        # Older Veeam versions used a PSSnapin instead of a module
         Add-PSSnapin VeeamPSSnapin -ErrorAction Stop
     }
 }
@@ -237,7 +227,6 @@ catch {
 }
 
 try {
-    # Running locally on the Veeam server - connects to the local instance.
     if (-not (Get-VBRServerSession)) {
         Connect-VBRServer -Server "localhost"
     }
@@ -254,7 +243,6 @@ catch {
 $startDate = (Get-Date).AddDays(-$ReportDays)
 Write-Log "Collecting backup sessions since $startDate ..."
 
-# All backup job sessions (regular backup jobs) in the window
 $allSessions = Get-VBRBackupSession | Where-Object { $_.CreationTime -ge $startDate }
 
 if (-not $allSessions -or $allSessions.Count -eq 0) {
@@ -262,14 +250,13 @@ if (-not $allSessions -or $allSessions.Count -eq 0) {
 }
 
 # ------------------------------------------------------------------
-# 2b. Repository storage usage (capacity / used / free)
+# 2b. Repository storage usage
 # ------------------------------------------------------------------
 
 Write-Log "Collecting repository storage usage..."
 
 $repoRows = @()
 
-# Standard (non scale-out) repositories
 Get-VBRBackupRepository -WarningAction SilentlyContinue | ForEach-Object {
     $r = $_
     $total = 0; $free = 0
@@ -291,8 +278,6 @@ Get-VBRBackupRepository -WarningAction SilentlyContinue | ForEach-Object {
     }
 }
 
-# Scale-out backup repositories (sum of their extents) - only on Veeam
-# editions/versions that expose this cmdlet (SOBR requires Enterprise+ licensing)
 if (Get-Command Get-VBRScaleOutBackupRepository -ErrorAction SilentlyContinue) {
     Get-VBRScaleOutBackupRepository -WarningAction SilentlyContinue | ForEach-Object {
         $sobr = $_
@@ -318,7 +303,7 @@ if (Get-Command Get-VBRScaleOutBackupRepository -ErrorAction SilentlyContinue) {
     }
 }
 else {
-    Write-Log "Get-VBRScaleOutBackupRepository not available on this Veeam install - skipping SOBR (this is normal on Standard/non-SOBR setups)." "INFO"
+    Write-Log "Get-VBRScaleOutBackupRepository not available on this Veeam install - skipping SOBR." "INFO"
 }
 
 $repoRows = $repoRows | ForEach-Object {
@@ -332,7 +317,7 @@ $totalFreeB     = ($repoRows | Measure-Object -Property FreeB -Sum).Sum
 $overallUsedPct = if ($totalCapacityB -gt 0) { [math]::Round(($totalUsedB / $totalCapacityB) * 100, 1) } else { 0 }
 
 # ------------------------------------------------------------------
-# 2c. All configured jobs (regardless of the report window)
+# 2c. All configured jobs
 # ------------------------------------------------------------------
 
 Write-Log "Collecting configured jobs list..."
@@ -396,7 +381,7 @@ $jobRows = $allSessions | Sort-Object CreationTime -Descending | ForEach-Object 
 }
 
 # ------------------------------------------------------------------
-# 5. Per-machine rows (task sessions inside each backup session)
+# 5. Per-machine rows
 # ------------------------------------------------------------------
 
 Write-Log "Collecting per-machine task details..."
@@ -417,7 +402,6 @@ $machineRows = foreach ($s in $allSessions) {
     }
 }
 
-# Aggregate per machine: last status, last backup time, number of runs, failures
 $machineSummary = $machineRows | Group-Object Machine | ForEach-Object {
     $rows   = $_.Group | Sort-Object Start -Descending
     $latest = $rows | Select-Object -First 1
@@ -438,7 +422,7 @@ $machineSummary = $machineRows | Group-Object Machine | ForEach-Object {
 } | Sort-Object Machine
 
 # ------------------------------------------------------------------
-# 5b. Daily trend (for the mini bar chart) + failed-job callout list
+# 5b. Daily trend + failed-job callout list
 # ------------------------------------------------------------------
 
 $dayBuckets = for ($i = $ReportDays - 1; $i -ge 0; $i--) {
@@ -454,6 +438,9 @@ $dayBuckets = for ($i = $ReportDays - 1; $i -ge 0; $i--) {
 $dayMax = [math]::Max((($dayBuckets | ForEach-Object { $_.Success + $_.Warning + $_.Failed } | Measure-Object -Maximum).Maximum), 1)
 
 $failedJobsList = $jobRows | Where-Object { $_.Result -eq "Failed" } | Select-Object -First 8
+
+# --- Trigger CSS Grid class if report days are greater than 15 ---
+$trendLayoutClass = if ($ReportDays -gt 15) { "trend-grid" } else { "" }
 
 # ------------------------------------------------------------------
 # 6. Build HTML
@@ -511,7 +498,7 @@ if (-not $machineRowsHtml) {
     $machineRowsHtml = '<tr><td colspan="8" class="empty">No machine data in this period.</td></tr>'
 }
 
-# --- Donut chart (success rate) via conic-gradient -----------------
+# --- Donut chart angle calculations (Fixed inline spacing) ---
 $donutDeg = [math]::Round(3.6 * $successRate, 1)
 $donutColor = if ($successRate -ge 95) { "#1e8e5a" } elseif ($successRate -ge 80) { "#c98a1f" } else { "#c9432f" }
 
@@ -558,7 +545,7 @@ if (-not $repoBarsHtml) {
     $repoBarsHtml = '<div class="empty">No backup repositories found.</div>'
 }
 
-# --- Configured jobs list (name, type, and enabled/disabled state) --
+# --- Configured jobs list -------------------------------------------
 $jobListHtml = ($configuredJobs | ForEach-Object {
     $stateTag = if ($_.Enabled) { '<span class="job-type job-enabled">Enabled</span>' } else { '<span class="job-type job-disabled">Disabled</span>' }
     @"
@@ -610,7 +597,9 @@ $html = @"
 
   .overview { display:flex; gap:16px; margin:20px 0; flex-wrap:wrap; align-items:stretch; }
   .donut-card { background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(20,30,40,0.08); padding:18px 22px; display:flex; align-items:center; gap:18px; min-width:250px; }
-  .donut { width:92px; height:92px; border-radius:50%; flex-shrink:0; background:conic-gradient($donutColor 0deg $donutDeg deg, #e7ebee $donutDeg deg 360deg); display:flex; align-items:center; justify-content:center; }
+  
+  /* Fixed Donut CSS Bugs (ensured continuous $($variable)deg string format) */
+  .donut { width:92px; height:92px; border-radius:50%; flex-shrink:0; background:conic-gradient($donutColor 0deg $($donutDeg)deg, #e7ebee $($donutDeg)deg 360deg); display:flex; align-items:center; justify-content:center; }
   .donut-inner { width:66px; height:66px; border-radius:50%; background:#fff; display:flex; align-items:center; justify-content:center; flex-direction:column; }
   .donut-inner .pct { font-size:18px; font-weight:700; color:$donutColor; }
   .donut-inner .lbl { font-size:9px; color:#8a97a1; text-transform:uppercase; }
@@ -619,14 +608,21 @@ $html = @"
 
   .trend-card { background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(20,30,40,0.08); padding:18px 22px; flex:1; min-width:280px; }
   .trend-card h3 { margin:0 0 12px 0; font-size:13px; color:#3c4b57; text-transform:uppercase; letter-spacing:.03em; }
+  
+  /* Daily Trend Layout Area */
   .daychart { display:flex; align-items:flex-end; gap:8px; height:80px; }
+  
+  /* CSS Grid Layout triggered when days exceed 15 */
+  .daychart.trend-grid { display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); gap: 16px 8px; height: auto; }
+  .daychart.trend-grid .daybar { height: auto; }
+
   .daybar { display:flex; flex-direction:column; align-items:center; flex:1; height:100%; justify-content:flex-end; }
   .daybar-stack { width:100%; max-width:22px; height:64px; display:flex; flex-direction:column-reverse; border-radius:3px; overflow:hidden; background:#f0f3f5; }
   .seg { width:100%; }
   .seg-success { background:#2fa870; }
   .seg-warning { background:#e0a63e; }
   .seg-failed  { background:#dd5847; }
-  .daybar-label { font-size:10px; color:#8a97a1; margin-top:6px; }
+  .daybar-label { font-size:10px; color:#8a97a1; margin-top:6px; white-space: nowrap; }
 
   .card-row { display:flex; gap:12px; margin:0 0 20px 0; flex-wrap:wrap; }
   .card { background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(20,30,40,0.08); padding:16px 20px; flex:1; min-width:150px; text-align:center; }
@@ -711,7 +707,7 @@ $html = @"
     </div>
     <div class="trend-card">
       <h3>Daily result trend</h3>
-      <div class="daychart">
+      <div class="daychart $trendLayoutClass">
         $dayBarsHtml
       </div>
     </div>
@@ -729,7 +725,7 @@ $html = @"
     <h2>Backup Repository Storage</h2>
     <div class="storage-layout">
       <div class="donut-card storage-donut-card">
-        <div class="donut" style="background:conic-gradient($storageDonutColor 0deg $storageDonutDeg deg, #e7ebee $storageDonutDeg deg 360deg);">
+        <div class="donut" style="background:conic-gradient($storageDonutColor 0deg $($storageDonutDeg)deg, #e7ebee $($storageDonutDeg)deg 360deg);">
           <div class="donut-inner"><div class="pct" style="color:$storageDonutColor;">$overallUsedPct%</div><div class="lbl">Used</div></div>
         </div>
         <div class="donut-text">
