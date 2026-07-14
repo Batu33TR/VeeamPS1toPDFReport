@@ -38,10 +38,30 @@
 [CmdletBinding()]
 param(
     [int]    $ReportDays     = 30,
+
+    # ---- EDIT THESE TWO TO MATCH YOUR ENVIRONMENT ----
+    # (still overridable per-run, e.g. -CustomerName "Other Ltd.")
     [string] $CustomerName   = "Customer",
+    [string] $LogoPath,   # defaults to logo.png next to this script (see below) - png/jpg/svg, leave the file missing and the report just skips the logo
+    # ----------------------------------------------------
+
     [string] $OutputFolder   = "C:\VeeamReports",
     [switch] $SkipPdf
 )
+
+# $PSScriptRoot isn't always populated yet at the point param() defaults are
+# evaluated (depends on how the script was launched), so resolve the logo's
+# default location here instead, with a fallback via $MyInvocation. If neither
+# is available (e.g. pasted into a console), the report just skips the logo.
+if (-not $LogoPath) {
+    $scriptDir = $PSScriptRoot
+    if (-not $scriptDir -and $MyInvocation.MyCommand.Path) {
+        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    }
+    if ($scriptDir) {
+        $LogoPath = Join-Path $scriptDir "logo.png"
+    }
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -532,11 +552,14 @@ $donutColor = if ($successRate -ge 95) { "#1e8e5a" } elseif ($successRate -ge 80
 $donutSvg = New-DonutSvg -Percent $successRate -Color $donutColor -CenterLabel "Success"
 
 # --- Daily trend mini bar chart -------------------------------------
+# Each bar is normalized to its OWN day's total (not the busiest day), so every
+# day with at least one run fills the full bar height - showing the proportion
+# of success/warning/failed for that day rather than raw volume vs. other days.
 $dayBarsHtml = ($dayBuckets | ForEach-Object {
     $total = $_.Success + $_.Warning + $_.Failed
-    $hS = if ($total -gt 0) { [math]::Round(($_.Success / $dayMax) * 100, 1) } else { 0 }
-    $hW = if ($total -gt 0) { [math]::Round(($_.Warning / $dayMax) * 100, 1) } else { 0 }
-    $hF = if ($total -gt 0) { [math]::Round(($_.Failed  / $dayMax) * 100, 1) } else { 0 }
+    $hS = if ($total -gt 0) { [math]::Round(($_.Success / $total) * 100, 1) } else { 0 }
+    $hW = if ($total -gt 0) { [math]::Round(($_.Warning / $total) * 100, 1) } else { 0 }
+    $hF = if ($total -gt 0) { [math]::Round(($_.Failed  / $total) * 100, 1) } else { 0 }
     $dLabel = $_.Date.ToString("dd/MM")
     @"
       <div class="daybar" title="$($_.Date.ToString('dd/MM/yyyy')): $($_.Success) success, $($_.Warning) warning, $($_.Failed) failed">
@@ -590,6 +613,34 @@ if (-not $jobListHtml) {
     $jobListHtml = '<div class="empty">No jobs configured on this server.</div>'
 }
 
+# --- Company logo (embedded as base64 so it survives PDF export / email) ---
+$logoHtml = ""
+if ($LogoPath) {
+    if (Test-Path -LiteralPath $LogoPath) {
+        try {
+            $logoBytes = [System.IO.File]::ReadAllBytes($LogoPath)
+            $logoBase64 = [Convert]::ToBase64String($logoBytes)
+            $ext = [System.IO.Path]::GetExtension($LogoPath).TrimStart('.').ToLower()
+            $mime = switch ($ext) {
+                "png"  { "image/png" }
+                "jpg"  { "image/jpeg" }
+                "jpeg" { "image/jpeg" }
+                "svg"  { "image/svg+xml" }
+                "gif"  { "image/gif" }
+                "webp" { "image/webp" }
+                default { "image/png" }
+            }
+            $logoHtml = "<img src=`"data:$mime;base64,$logoBase64`" class=`"header-logo`" alt=`"$(HtmlEncode $CustomerName) logo`" />"
+        }
+        catch {
+            Write-Log "Could not read logo file '$LogoPath': $_" "WARN"
+        }
+    }
+    else {
+        Write-Log "LogoPath '$LogoPath' not found - continuing without a logo." "WARN"
+    }
+}
+
 # --- Failed-job callout ----------------------------------------------
 $failedCalloutHtml = ""
 if ($failedJobsList -and $failedJobsList.Count -gt 0) {
@@ -619,10 +670,12 @@ $html = @"
   body { font-family: 'Segoe UI', Arial, sans-serif; background:#eef1f5; margin:0; padding:0; color:#26313c; }
   .wrapper { max-width:1040px; margin:0 auto; padding:24px; }
 
-  .header { background:linear-gradient(135deg,#16324f 0%,#1c4a75 100%); color:#fff; padding:28px 32px; border-radius:10px; position:relative; overflow:hidden; }
+  .header { background:linear-gradient(135deg,#16324f 0%,#1c4a75 100%); color:#fff; padding:28px 32px; border-radius:10px; position:relative; overflow:hidden; display:flex; align-items:center; justify-content:space-between; gap:24px; }
+  .header-text { min-width:0; }
   .header h1 { margin:0 0 6px 0; font-size:24px; font-weight:600; }
   .header p { margin:0; color:#cfe0ee; font-size:13px; }
   .header .tag { display:inline-block; margin-top:12px; background:rgba(255,255,255,0.14); border-radius:20px; padding:4px 12px; font-size:12px; }
+  .header-logo { max-height:56px; max-width:180px; width:auto; height:auto; object-fit:contain; flex-shrink:0; background:#fff; padding:6px 10px; border-radius:8px; }
 
   .overview { display:flex; gap:16px; margin:20px 0; flex-wrap:wrap; align-items:stretch; }
   .donut-card { background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(20,30,40,0.08); padding:18px 22px; display:flex; align-items:center; gap:18px; min-width:250px; }
@@ -715,6 +768,8 @@ $html = @"
     .card-row { flex-direction:column; }
     .storage-layout { flex-direction:column; }
     .storage-donut-card { flex:1 1 auto; width:100%; }
+    .header { flex-direction:column; align-items:flex-start; }
+    .header-logo { align-self:flex-end; }
   }
 </style>
 </head>
@@ -722,9 +777,12 @@ $html = @"
 <div class="wrapper">
 
   <div class="header">
-    <h1>$(HtmlEncode $CustomerName) &ndash; Backup Report</h1>
-    <p>Period: $periodText &nbsp;|&nbsp; Generated: $reportGenerated</p>
-    <span class="tag">Last $ReportDays days &nbsp;&bull;&nbsp; $totalSessions job runs</span>
+    <div class="header-text">
+      <h1>$(HtmlEncode $CustomerName) &ndash; Backup Report</h1>
+      <p>Period: $periodText &nbsp;|&nbsp; Generated: $reportGenerated</p>
+      <span class="tag">Last $ReportDays days &nbsp;&bull;&nbsp; $totalSessions job runs</span>
+    </div>
+    $logoHtml
   </div>
 
   <div class="overview">
