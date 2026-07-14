@@ -132,6 +132,35 @@ function Get-TaskStartTime {
     return $FallbackSession.CreationTime
 }
 
+function New-DonutSvg {
+    # CSS conic-gradient renders unreliably (gaps / wrong angles) when headless
+    # Chrome/Edge rasterizes it for --print-to-pdf, since PDF export uses a
+    # different rendering path than the on-screen browser. An SVG ring (stroke-
+    # dasharray trick) renders identically on screen and in PDF, so use that
+    # instead for anything that has to survive a PDF export.
+    param(
+        [double]$Percent,
+        [string]$Color,
+        [string]$CenterLabel,
+        [int]$Size = 92
+    )
+    $pct = [math]::Max(0, [math]::Min(100, $Percent))
+    $r = 42
+    $circumference = [math]::Round(2 * [math]::PI * $r, 3)
+    $dash = [math]::Round(($pct / 100) * $circumference, 3)
+    $gap  = [math]::Round($circumference - $dash, 3)
+    $pctText = "{0:0.#}%" -f $pct
+    $labelText = $CenterLabel.ToUpper()
+    @"
+<svg width="$Size" height="$Size" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="50" cy="50" r="$r" fill="none" stroke="#e7ebee" stroke-width="14" />
+  <circle cx="50" cy="50" r="$r" fill="none" stroke="$Color" stroke-width="14" stroke-dasharray="$dash $gap" stroke-linecap="butt" transform="rotate(-90 50 50)" />
+  <text x="50" y="47" text-anchor="middle" font-size="19" font-weight="700" fill="$Color" font-family="Segoe UI, Arial, sans-serif">$pctText</text>
+  <text x="50" y="63" text-anchor="middle" font-size="8" fill="#8a97a1" font-family="Segoe UI, Arial, sans-serif" letter-spacing="0.5">$labelText</text>
+</svg>
+"@
+}
+
 function Convert-HtmlFileToPdf {
     param(
         [Parameter(Mandatory)]
@@ -498,9 +527,9 @@ if (-not $machineRowsHtml) {
     $machineRowsHtml = '<tr><td colspan="8" class="empty">No machine data in this period.</td></tr>'
 }
 
-# --- Donut chart angle calculations (Fixed inline spacing) ---
-$donutDeg = [math]::Round(3.6 * $successRate, 1)
+# --- Donut chart (SVG ring - reliable in PDF export, unlike conic-gradient) ---
 $donutColor = if ($successRate -ge 95) { "#1e8e5a" } elseif ($successRate -ge 80) { "#c98a1f" } else { "#c9432f" }
+$donutSvg = New-DonutSvg -Percent $successRate -Color $donutColor -CenterLabel "Success"
 
 # --- Daily trend mini bar chart -------------------------------------
 $dayBarsHtml = ($dayBuckets | ForEach-Object {
@@ -508,7 +537,7 @@ $dayBarsHtml = ($dayBuckets | ForEach-Object {
     $hS = if ($total -gt 0) { [math]::Round(($_.Success / $dayMax) * 100, 1) } else { 0 }
     $hW = if ($total -gt 0) { [math]::Round(($_.Warning / $dayMax) * 100, 1) } else { 0 }
     $hF = if ($total -gt 0) { [math]::Round(($_.Failed  / $dayMax) * 100, 1) } else { 0 }
-    $dLabel = $_.Date.ToString("ddd d")
+    $dLabel = $_.Date.ToString("dd/MM")
     @"
       <div class="daybar" title="$($_.Date.ToString('dd/MM/yyyy')): $($_.Success) success, $($_.Warning) warning, $($_.Failed) failed">
         <div class="daybar-stack">
@@ -521,9 +550,9 @@ $dayBarsHtml = ($dayBuckets | ForEach-Object {
 "@
 }) -join "`n"
 
-# --- Storage overview donut ------------------------------------------
-$storageDonutDeg   = [math]::Round(3.6 * $overallUsedPct, 1)
+# --- Storage overview donut (SVG ring) ------------------------------
 $storageDonutColor = Get-UsageColor -Pct $overallUsedPct
+$storageDonutSvg = New-DonutSvg -Percent $overallUsedPct -Color $storageDonutColor -CenterLabel "Used"
 
 # --- Per-repository usage bars -----------------------------------------
 $repoBarsHtml = ($repoRows | ForEach-Object {
@@ -597,12 +626,11 @@ $html = @"
 
   .overview { display:flex; gap:16px; margin:20px 0; flex-wrap:wrap; align-items:stretch; }
   .donut-card { background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(20,30,40,0.08); padding:18px 22px; display:flex; align-items:center; gap:18px; min-width:250px; }
-  
-  /* Fixed Donut CSS Bugs (ensured continuous $($variable)deg string format) */
-  .donut { width:92px; height:92px; border-radius:50%; flex-shrink:0; background:conic-gradient($donutColor 0deg $($donutDeg)deg, #e7ebee $($donutDeg)deg 360deg); display:flex; align-items:center; justify-content:center; }
-  .donut-inner { width:66px; height:66px; border-radius:50%; background:#fff; display:flex; align-items:center; justify-content:center; flex-direction:column; }
-  .donut-inner .pct { font-size:18px; font-weight:700; color:$donutColor; }
-  .donut-inner .lbl { font-size:9px; color:#8a97a1; text-transform:uppercase; }
+
+  /* Donut rings are rendered as inline SVG (see New-DonutSvg) rather than a CSS
+     conic-gradient, since conic-gradient rasterizes unreliably in headless
+     Chrome/Edge's PDF export. */
+  .donut-wrap { flex-shrink:0; line-height:0; }
   .donut-text .big { font-size:14px; font-weight:600; }
   .donut-text .small { font-size:12px; color:#6b7a86; margin-top:2px; }
 
@@ -611,18 +639,20 @@ $html = @"
   
   /* Daily Trend Layout Area */
   .daychart { display:flex; align-items:flex-end; gap:8px; height:80px; }
-  
-  /* CSS Grid Layout triggered when days exceed 15 */
-  .daychart.trend-grid { display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); gap: 16px 8px; height: auto; }
-  .daychart.trend-grid .daybar { height: auto; }
 
-  .daybar { display:flex; flex-direction:column; align-items:center; flex:1; height:100%; justify-content:flex-end; }
+  /* CSS Grid Layout triggered when days exceed 15 */
+  .daychart.trend-grid { display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); gap: 18px 6px; height: auto; }
+  .daychart.trend-grid .daybar { height: auto; }
+  .daychart.trend-grid .daybar-label { font-size:8.5px; letter-spacing:-0.2px; }
+  .daychart.trend-grid .daybar-stack { max-width:16px; }
+
+  .daybar { display:flex; flex-direction:column; align-items:center; flex:1; height:100%; justify-content:flex-end; min-width:0; }
   .daybar-stack { width:100%; max-width:22px; height:64px; display:flex; flex-direction:column-reverse; border-radius:3px; overflow:hidden; background:#f0f3f5; }
   .seg { width:100%; }
   .seg-success { background:#2fa870; }
   .seg-warning { background:#e0a63e; }
   .seg-failed  { background:#dd5847; }
-  .daybar-label { font-size:10px; color:#8a97a1; margin-top:6px; white-space: nowrap; }
+  .daybar-label { font-size:10px; color:#8a97a1; margin-top:6px; white-space:nowrap; text-align:center; }
 
   .card-row { display:flex; gap:12px; margin:0 0 20px 0; flex-wrap:wrap; }
   .card { background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(20,30,40,0.08); padding:16px 20px; flex:1; min-width:150px; text-align:center; }
@@ -699,7 +729,7 @@ $html = @"
 
   <div class="overview">
     <div class="donut-card">
-      <div class="donut"><div class="donut-inner"><div class="pct">$successRate%</div><div class="lbl">Success</div></div></div>
+      <div class="donut-wrap">$donutSvg</div>
       <div class="donut-text">
         <div class="big">$successSessions of $totalSessions jobs succeeded</div>
         <div class="small">$warningSessions warning &nbsp;&bull;&nbsp; $failedSessions failed</div>
@@ -725,9 +755,7 @@ $html = @"
     <h2>Backup Repository Storage</h2>
     <div class="storage-layout">
       <div class="donut-card storage-donut-card">
-        <div class="donut" style="background:conic-gradient($storageDonutColor 0deg $($storageDonutDeg)deg, #e7ebee $($storageDonutDeg)deg 360deg);">
-          <div class="donut-inner"><div class="pct" style="color:$storageDonutColor;">$overallUsedPct%</div><div class="lbl">Used</div></div>
-        </div>
+        <div class="donut-wrap">$storageDonutSvg</div>
         <div class="donut-text">
           <div class="big">$(Format-Bytes $totalUsedB) used of $(Format-Bytes $totalCapacityB)</div>
           <div class="small">$(Format-Bytes $totalFreeB) free across $($repoRows.Count) repositor$(if ($repoRows.Count -eq 1) { 'y' } else { 'ies' })</div>
