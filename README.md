@@ -1,6 +1,6 @@
-# Veeam 7-Day HTML Backup Report
+# Veeam Backup & Replication HTML&PDF Backup Reporter
 
-A PowerShell script that runs locally on your Veeam Backup & Replication server and generates a polished, self-contained HTML report covering the last N days (default 7) of backup activity — job results, speeds, protected machines, and repository storage usage. It can save the report to disk, email it, or both.
+A PowerShell script that runs locally on your Veeam Backup & Replication server and generates a polished, self-contained HTML report covering the last N days (default 7) of backup activity — job results, speeds, protected machines, and repository storage usage. It can save the report to disk.
 
 ---
 
@@ -23,7 +23,6 @@ All dates/times are rendered as `DD/MM/YYYY HH:mm:ss` regardless of the server's
 - Windows Server 2019 or newer
 - Must run **locally on the Veeam Backup & Replication server** (it connects to `localhost`)
 - Veeam Backup & Replication PowerShell module (installed automatically with the Veeam console — no separate install needed)
-- Windows PowerShell 5.1 (the default on Server 2019/2022) is recommended, especially if you use the built-in email feature (`Send-MailMessage`)
 
 ---
 
@@ -32,16 +31,7 @@ All dates/times are rendered as `DD/MM/YYYY HH:mm:ss` regardless of the server's
 Generate the report only, no email — good for a scheduled task:
 
 ```powershell
-.\Veeam-7Day-HTML-Report.ps1 -CustomerName "Contoso Ltd." -OutputFolder "D:\Reports"
-```
-
-Generate **and** email the report:
-
-```powershell
-.\Veeam-7Day-HTML-Report.ps1 -CustomerName "Contoso Ltd." -SendEmail `
-    -SmtpServer "smtp.office365.com" -SmtpPort 587 -SmtpUseSsl `
-    -SmtpUser "reports@yourmsp.com" -SmtpPassword (Read-Host -AsSecureString) `
-    -EmailFrom "reports@yourmsp.com" -EmailTo "customer@contoso.com"
+.\VeeamReport7Days.ps1 -CustomerName "CustomerName Ltd." -OutputFolder "D:\Reports"
 ```
 
 ---
@@ -53,15 +43,6 @@ Generate **and** email the report:
 | `-ReportDays` | `7` | How many days back to include |
 | `-CustomerName` | `"Customer"` | Friendly name shown in the report header and used in the output filename |
 | `-OutputFolder` | `C:\VeeamReports` | Where the generated `.html` file is saved (created automatically if missing) |
-| `-SendEmail` | *(off)* | Switch — if present, the report is emailed after being saved |
-| `-SmtpServer` | — | SMTP relay hostname (required if `-SendEmail`) |
-| `-SmtpPort` | `587` | SMTP port |
-| `-SmtpUseSsl` | *(off)* | Switch — enables SSL/TLS on the SMTP connection |
-| `-SmtpUser` / `-SmtpPassword` | — | SMTP credentials, if your relay requires auth (`SmtpPassword` is a `SecureString`) |
-| `-EmailFrom` | — | Sender address (required if `-SendEmail`) |
-| `-EmailTo` | — | Recipient address(es), comma-separated (required if `-SendEmail`) |
-| `-EmailCc` | — | CC address(es), comma-separated |
-| `-EmailSubject` | `"$CustomerName - Backup Report (last $ReportDays days)"` | Email subject line |
 
 ---
 
@@ -73,7 +54,7 @@ Each run creates a uniquely named file so old reports are never overwritten:
 <OutputFolder>\BackupReport_<CustomerName>_<yyyyMMdd_HHmmss>.html
 ```
 
-Example: `C:\VeeamReports\BackupReport_Contoso_Ltd_20260714_091238.html`
+Example: `C:\VeeamReports\BackupReport_CustomerName_Ltd_20260714_091238.html`
 
 ---
 
@@ -85,12 +66,11 @@ Run it automatically with Windows Task Scheduler:
 2. Action: `powershell.exe`
 3. Arguments:
    ```
-   -NoProfile -ExecutionPolicy Bypass -File "C:\Path\To\Veeam-7Day-HTML-Report.ps1" -CustomerName "Contoso Ltd." -SendEmail -SmtpServer "smtp.office365.com" -SmtpPort 587 -SmtpUseSsl -EmailFrom "reports@yourmsp.com" -EmailTo "customer@contoso.com"
+   -NoProfile -ExecutionPolicy Bypass -File "C:\Path\To\VeeamReport7Days.ps1" -CustomerName "CustomerName Ltd."
    ```
 4. Run as a service account with local admin rights on the Veeam server (needed for the Veeam PowerShell module).
-5. If using `-SmtpUser`/`-SmtpPassword`, either store the password securely (e.g. via a credential file created with `Export-Clixml`) or use an SMTP relay that allows anonymous relay from the Veeam server's IP, which avoids storing credentials in the task at all.
 
-For multiple customers on one Veeam server, run the script once per customer with different `-CustomerName` / `-EmailTo` values (and filter jobs by name pattern if you need to scope which jobs appear per customer — ask if you want this added).
+For multiple customers on one Veeam server, run the script once per customer with different `-CustomerName` values.
 
 ---
 
@@ -101,7 +81,6 @@ These came up during testing and are already handled in the script, documented h
 - **`Get-VBRScaleOutBackupRepository not available`** — this cmdlet only exists if your Veeam edition/version supports Scale-Out Backup Repositories. The script checks for it first and simply skips SOBR collection if it's not present. Your regular repositories are unaffected.
 - **Repository capacity numbers** — Veeam returns `CachedTotalSpace`/`CachedFreeSpace` as a `VMemorySize` object, not a plain number. The script unwraps this safely (`Get-BytesValue`); if you ever see `0 B` for a repository, check the console output for a `WARN` line — some repository types (e.g. cloud/object storage tiers) don't report a fixed total size.
 - **Per-machine "Last Backup" time** — some Veeam versions/job types don't populate the task-level start time consistently. The script tries several known property paths and falls back to the parent job session's start time if all else fails, so this column should never be blank.
-- **`Send-MailMessage` deprecation warning** — it's marked obsolete by Microsoft but still fully functional on Windows PowerShell 5.1 (Server 2019/2022 default). If you move to PowerShell 7+, swap this block for `Send-MailKitMessage` or a raw `System.Net.Mail.SmtpClient` call instead.
 
 ---
 
@@ -111,7 +90,7 @@ The report's colors, fonts, and layout are all in the `<style>` block inside the
 
 - **Company logo**: add an `<img>` tag inside the `.header` div, pointing to a hosted image URL (email clients generally won't render locally embedded images without extra work).
 - **Color thresholds**: `Get-UsageColor` (storage) and the inline success-rate logic near `$donutColor` control the green/amber/red cutoffs.
-- **Which jobs appear**: currently all jobs/sessions are included. To scope by customer, filter `$allSessions` and `$configuredJobs` by job name pattern (e.g. `Where-Object { $_.JobName -like "Contoso*" }`).
+- **Which jobs appear**: currently all jobs/sessions are included. To scope by customer, filter `$allSessions` and `$configuredJobs` by job name pattern (e.g. `Where-Object { $_.JobName -like "CustomerName*" }`).
 
 ---
 
