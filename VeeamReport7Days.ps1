@@ -1,17 +1,19 @@
 <#
 .SYNOPSIS
-    Generates a 7-day Veeam Backup & Replication HTML report (success/failed, speeds,
-    backed-up machines) and optionally emails it to customers.
+    Generates a 7-day Veeam Backup & Replication HTML/PDF report (success/failed, speeds,
+    backed-up machines).
 
 .DESCRIPTION
     Run this script LOCALLY on the Veeam Backup & Replication server (Windows Server
     2019+). It uses the Veeam PowerShell module to pull job/session history for the
     last N days, builds a clean HTML report (summary cards + job table + per-machine
-    table), saves it to disk, and can send it via SMTP.
+    table), saves it to disk, and automatically converts it to PDF.
 
 .NOTES
     Requires: Veeam Backup & Replication PowerShell module (installed automatically
     with the Veeam B&R console). Tested against Veeam v11/v12 cmdlets.
+    PDF output uses headless Microsoft Edge or Google Chrome (Edge is recommended
+    on Windows Server 2019/2022).
 
 .PARAMETER ReportDays
     How many days back to include. Default 7.
@@ -20,33 +22,25 @@
     Friendly name shown in the report header (e.g. "Contoso Ltd.").
 
 .PARAMETER OutputFolder
-    Where to save the generated HTML file.
+    Where to save the generated HTML and PDF files.
 
-.PARAMETER SendEmail
-    Switch. If present, the report is emailed using the SMTP settings below.
-
-.PARAMETER SmtpServer / SmtpPort / SmtpUseSsl / SmtpUser / SmtpPassword
-    SMTP relay/credentials used to send the email.
-
-.PARAMETER EmailFrom / EmailTo / EmailCc
-    Envelope addresses. EmailTo / EmailCc accept comma-separated lists.
+.PARAMETER SkipPdf
+    Switch. If present, only the HTML file is saved (no PDF conversion).
 
 .EXAMPLE
-    .\Veeam-7Day-HTML-Report.ps1 -CustomerName "Contoso Ltd." -SendEmail `
-        -SmtpServer "smtp.office365.com" -SmtpPort 587 -SmtpUseSsl `
-        -SmtpUser "reports@yourmsp.com" -SmtpPassword (Read-Host -AsSecureString) `
-        -EmailFrom "reports@yourmsp.com" -EmailTo "customer@contoso.com"
+    .\VeeamReport7Days.ps1 -CustomerName "Contoso Ltd." -OutputFolder "D:\Reports"
 
 .EXAMPLE
-    # Just generate the file, no email, schedule this with Task Scheduler
-    .\Veeam-7Day-HTML-Report.ps1 -CustomerName "Contoso Ltd." -OutputFolder "D:\Reports"
+    # HTML only, skip PDF
+    .\VeeamReport7Days.ps1 -CustomerName "Contoso Ltd." -SkipPdf
 #>
 
 [CmdletBinding()]
 param(
     [int]    $ReportDays     = 7,
     [string] $CustomerName   = "Customer",
-    [string] $OutputFolder   = "C:\VeeamReports"
+    [string] $OutputFolder   = "C:\VeeamReports",
+    [switch] $SkipPdf
 )
 
 $ErrorActionPreference = "Stop"
@@ -145,6 +139,82 @@ function Get-TaskStartTime {
         catch { }
     }
     return $FallbackSession.CreationTime
+}
+
+function Convert-HtmlFileToPdf {
+    param(
+        [Parameter(Mandatory)]
+        [string]$HtmlPath,
+        [Parameter(Mandatory)]
+        [string]$PdfPath
+    )
+
+    if (-not (Test-Path -LiteralPath $HtmlPath)) {
+        throw "HTML file not found: $HtmlPath"
+    }
+
+    $browser = @(
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if (-not $browser) {
+        Write-Log "Skipping PDF: Microsoft Edge or Google Chrome is required for HTML-to-PDF conversion." "WARN"
+        return $false
+    }
+
+    $htmlUri = ([Uri][System.IO.Path]::GetFullPath($HtmlPath)).AbsoluteUri
+    $pdfFullPath = [System.IO.Path]::GetFullPath($PdfPath)
+    $pdfDir = Split-Path $pdfFullPath -Parent
+    if (-not (Test-Path $pdfDir)) {
+        New-Item -Path $pdfDir -ItemType Directory -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $pdfFullPath) {
+        Remove-Item -LiteralPath $pdfFullPath -Force
+    }
+
+    $argSets = @(
+        @(
+            '--headless=new',
+            '--disable-gpu',
+            '--run-all-compositor-stages-before-draw',
+            '--virtual-time-budget=15000',
+            "--print-to-pdf=$pdfFullPath",
+            '--no-pdf-header-footer',
+            $htmlUri
+        ),
+        @(
+            '--headless',
+            '--disable-gpu',
+            '--run-all-compositor-stages-before-draw',
+            '--virtual-time-budget=15000',
+            "--print-to-pdf=$pdfFullPath",
+            '--no-pdf-header-footer',
+            $htmlUri
+        )
+    )
+
+    foreach ($browserArgs in $argSets) {
+        try {
+            Start-Process -FilePath $browser -ArgumentList $browserArgs -WindowStyle Hidden -Wait -ErrorAction Stop | Out-Null
+        }
+        catch {
+            continue
+        }
+
+        $deadline = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $pdfFullPath) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+        }
+        if (Test-Path -LiteralPath $pdfFullPath) {
+            return $true
+        }
+    }
+
+    Write-Log "PDF conversion failed for $HtmlPath (browser: $browser)." "WARN"
+    return $false
 }
 
 # ------------------------------------------------------------------
@@ -735,5 +805,17 @@ $outputPath = Join-Path $OutputFolder $fileName
 $html | Out-File -FilePath $outputPath -Encoding UTF8
 
 Write-Log "Report saved to $outputPath"
+
+# ------------------------------------------------------------------
+# 8. Convert HTML to PDF
+# ------------------------------------------------------------------
+
+if (-not $SkipPdf) {
+    $pdfPath = [System.IO.Path]::ChangeExtension($outputPath, '.pdf')
+    Write-Log "Converting report to PDF..."
+    if (Convert-HtmlFileToPdf -HtmlPath $outputPath -PdfPath $pdfPath) {
+        Write-Log "PDF saved to $pdfPath"
+    }
+}
 
 Write-Log "Done."
