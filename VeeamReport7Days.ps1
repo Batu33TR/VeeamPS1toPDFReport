@@ -46,18 +46,7 @@
 param(
     [int]    $ReportDays     = 7,
     [string] $CustomerName   = "Customer",
-    [string] $OutputFolder   = "C:\VeeamReports",
-
-    [switch] $SendEmail,
-    [string] $SmtpServer,
-    [int]    $SmtpPort       = 587,
-    [switch] $SmtpUseSsl,
-    [string] $SmtpUser,
-    [System.Security.SecureString] $SmtpPassword,
-    [string] $EmailFrom,
-    [string] $EmailTo,
-    [string] $EmailCc,
-    [string] $EmailSubject   = "$CustomerName - Backup Report (last $ReportDays days)"
+    [string] $OutputFolder   = "C:\VeeamReports"
 )
 
 $ErrorActionPreference = "Stop"
@@ -746,46 +735,5 @@ $outputPath = Join-Path $OutputFolder $fileName
 $html | Out-File -FilePath $outputPath -Encoding UTF8
 
 Write-Log "Report saved to $outputPath"
-
-# ------------------------------------------------------------------
-# 8. Optionally email it
-# ------------------------------------------------------------------
-
-if ($SendEmail) {
-    if (-not $SmtpServer -or -not $EmailFrom -or -not $EmailTo) {
-        Write-Log "SendEmail was specified but SmtpServer / EmailFrom / EmailTo are missing." "ERROR"
-        throw "Missing required email parameters."
-    }
-
-    Write-Log "Sending report by email to $EmailTo ..."
-
-    $mailParams = @{
-        SmtpServer = $SmtpServer
-        Port       = $SmtpPort
-        From       = $EmailFrom
-        To         = $EmailTo -split ","
-        Subject    = $EmailSubject
-        Body       = $html
-        BodyAsHtml = $true
-    }
-    if ($EmailCc)   { $mailParams.Cc = $EmailCc -split "," }
-    if ($SmtpUseSsl) { $mailParams.UseSsl = $true }
-    if ($SmtpUser -and $SmtpPassword) {
-        $mailParams.Credential = New-Object System.Management.Automation.PSCredential($SmtpUser, $SmtpPassword)
-    }
-
-    try {
-        # Note: Send-MailMessage is deprecated but still fully functional on
-        # Windows PowerShell 5.1 (default on Server 2019/2022). If you're on
-        # PowerShell 7+, swap this block for Send-MailKitMessage or a raw
-        # System.Net.Mail.SmtpClient call instead.
-        Send-MailMessage @mailParams
-        Write-Log "Email sent successfully."
-    }
-    catch {
-        Write-Log "Failed to send email: $_" "ERROR"
-        throw
-    }
-}
 
 Write-Log "Done."
